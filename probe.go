@@ -15,16 +15,18 @@ import (
 )
 
 type probeConfig struct {
-	Enabled              bool            `yaml:"enabled"`
-	FirstProxy           *proxyEndpoint  `yaml:"first_proxy"`
-	ProxyPool            []proxyEndpoint `yaml:"proxy_pool"`
-	TimeoutSeconds       int             `yaml:"timeout_seconds"`
-	RetrySeconds         int             `yaml:"retry_seconds"`
-	RefreshBeforeSeconds int             `yaml:"refresh_before_seconds"`
-	MaxAttempts          int             `yaml:"max_attempts"`
-	BackgroundRefresh    *bool           `yaml:"background_refresh"`
-	RefreshOnErrors      *bool           `yaml:"refresh_on_errors"`
-	QuotaBackoffSeconds  int             `yaml:"quota_backoff_seconds"`
+	Enabled                  bool            `yaml:"enabled"`
+	FirstProxy               *proxyEndpoint  `yaml:"first_proxy"`
+	ProxyPool                []proxyEndpoint `yaml:"proxy_pool"`
+	TimeoutSeconds           int             `yaml:"timeout_seconds"`
+	RetrySeconds             int             `yaml:"retry_seconds"`
+	RefreshBeforeSeconds     int             `yaml:"refresh_before_seconds"`
+	MaxAttempts              int             `yaml:"max_attempts"`
+	BackgroundRefresh        *bool           `yaml:"background_refresh"`
+	RefreshOnErrors          *bool           `yaml:"refresh_on_errors"`
+	QuotaBackoffSeconds      int             `yaml:"quota_backoff_seconds"`
+	RateLimitBackoffSeconds  int             `yaml:"rate_limit_backoff_seconds"`
+	AttemptPauseMilliseconds *int            `yaml:"attempt_pause_ms"`
 }
 
 func normalizeProbe(cfg *probeConfig) error {
@@ -43,8 +45,21 @@ func normalizeProbe(cfg *probeConfig) error {
 	if cfg.QuotaBackoffSeconds == 0 {
 		cfg.QuotaBackoffSeconds = 900
 	}
+	if cfg.RateLimitBackoffSeconds == 0 {
+		cfg.RateLimitBackoffSeconds = 600
+	}
+	if cfg.AttemptPauseMilliseconds == nil {
+		defaultPause := 2000
+		cfg.AttemptPauseMilliseconds = &defaultPause
+	}
 	if cfg.QuotaBackoffSeconds < 60 || cfg.QuotaBackoffSeconds > 86400 {
 		return errors.New("quota_backoff_seconds must be between 60 and 86400")
+	}
+	if cfg.RateLimitBackoffSeconds < 30 || cfg.RateLimitBackoffSeconds > 86400 {
+		return errors.New("rate_limit_backoff_seconds must be between 30 and 86400")
+	}
+	if *cfg.AttemptPauseMilliseconds < 0 || *cfg.AttemptPauseMilliseconds > 15000 {
+		return errors.New("attempt_pause_ms must be between 0 and 15000")
 	}
 	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 180 || cfg.RetrySeconds < 1 || cfg.RefreshBeforeSeconds < 0 || cfg.RefreshBeforeSeconds >= 3600 || cfg.MaxAttempts < 1 || cfg.MaxAttempts > 20 {
 		return errors.New("invalid probe limits")
@@ -127,13 +142,59 @@ func (state *runtimeState) selectedProbeAuth(authID string) (probeAuth, error) {
 	return probeAuth{}, errors.New("selected auth not found")
 }
 
+func abortKind(status string) string {
+	lower := strings.ToLower(status)
+	switch {
+	case strings.Contains(lower, "usage_limit_reached"), strings.Contains(lower, "insufficient_quota"):
+		return "quota"
+	case strings.Contains(lower, "rate_limit_exceeded"), strings.Contains(lower, "upstream_http_429"), strings.Contains(lower, "invalid_api_key"):
+		return "rate"
+	default:
+		return ""
+	}
+}
+
+func (state *runtimeState) blockAccountLocked(authID string, until time.Time) {
+	if authID == "" {
+		return
+	}
+	state.accountBlockedUntil[authID] = until
+	apply := func(key string) {
+		account, _ := splitStateKey(key)
+		if account == authID {
+			state.blockedUntil[key] = until
+		}
+	}
+	for key := range state.current {
+		apply(key)
+	}
+	for key := range state.probeResults {
+		apply(key)
+	}
+	for key := range state.lastProbe {
+		apply(key)
+	}
+	for key := range state.refreshRequests {
+		apply(key)
+	}
+}
+
+func (state *runtimeState) pauseAttempt(ctx context.Context, pause time.Duration) {
+	if pause <= 0 || ctx.Err() != nil {
+		return
+	}
+	if state.pause != nil {
+		state.pause(pause)
+	}
+}
+
 func (state *runtimeState) ensureProbe(authID, model string) {
 	key := stateKey(authID, model)
 	state.mu.Lock()
 	cfg := state.config
 	policy, ok := credentialFor(cfg, authID)
 	now := state.now()
-	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 4 {
+	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || state.probingAccounts[authID] > 0 || len(state.probing) >= 4 {
 		state.mu.Unlock()
 		return
 	}
@@ -143,7 +204,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		state.mu.Unlock()
 		return
 	}
-	if now.Before(state.blockedUntil[key]) {
+	if now.Before(state.blockedUntil[key]) || now.Before(state.accountBlockedUntil[authID]) {
 		state.mu.Unlock()
 		return
 	}
@@ -161,10 +222,15 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	state.probeReasons[key] = reason
 	state.probing[key] = true
+	state.probingAccounts[authID]++
 	generation := state.generation
 	ctx, cancel := context.WithTimeout(state.probeCtx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second)
 	start := state.poolCursor
 	state.poolCursor++
+	attemptPause := time.Duration(0)
+	if cfg.Probe.AttemptPauseMilliseconds != nil {
+		attemptPause = time.Duration(*cfg.Probe.AttemptPauseMilliseconds) * time.Millisecond
+	}
 	state.mu.Unlock()
 	defer cancel()
 	auth, err := state.selectedProbeAuth(authID)
@@ -173,6 +239,12 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	if err == nil {
 		outcome = "probe_failed"
 		for attempt := 0; attempt < cfg.Probe.MaxAttempts && ctx.Err() == nil; attempt++ {
+			if attempt > 0 {
+				state.pauseAttempt(ctx, attemptPause)
+				if ctx.Err() != nil {
+					break
+				}
+			}
 			// All attempts share one total deadline; none can escape the chain.
 			endpoint := cfg.Probe.ProxyPool[(int(start)+attempt)%len(cfg.Probe.ProxyPool)]
 			attemptCtx, attemptCancel := context.WithTimeout(ctx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second/time.Duration(cfg.Probe.MaxAttempts))
@@ -180,7 +252,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 			attemptCancel()
 			outcome = status
 			if status != "ok" {
-				if strings.Contains(status, "usage_limit_reached") || strings.Contains(status, "insufficient_quota") {
+				if abortKind(status) != "" {
 					break
 				}
 				continue
@@ -195,20 +267,29 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		}
 	}
 	state.mu.Lock()
+	delete(state.probing, key)
+	if n := state.probingAccounts[authID]; n <= 1 {
+		delete(state.probingAccounts, authID)
+	} else {
+		state.probingAccounts[authID] = n - 1
+	}
 	if generation != state.generation {
 		state.mu.Unlock()
 		return
 	}
-	delete(state.probing, key)
 	state.probeResults[key] = outcome
-	if strings.Contains(outcome, "usage_limit_reached") || strings.Contains(outcome, "insufficient_quota") {
-		state.blockedUntil[key] = state.now().Add(time.Duration(cfg.Probe.QuotaBackoffSeconds) * time.Second)
+	switch abortKind(outcome) {
+	case "quota":
+		state.blockAccountLocked(authID, state.now().Add(time.Duration(cfg.Probe.QuotaBackoffSeconds)*time.Second))
+	case "rate":
+		state.blockAccountLocked(authID, state.now().Add(time.Duration(cfg.Probe.RateLimitBackoffSeconds)*time.Second))
 	}
 	promoted := false
 	if state.accepting && candidate.Value != "" && candidate.IssuedAt.After(state.current[key].IssuedAt) && state.now().Before(candidate.IssuedAt.Add(turnStateTTL)) {
 		state.current[key] = candidate
 		delete(state.refreshRequests, key)
 		delete(state.blockedUntil, key)
+		delete(state.accountBlockedUntil, authID)
 		promoted = true
 	}
 	state.appendHistoryLocked(historyEntry{

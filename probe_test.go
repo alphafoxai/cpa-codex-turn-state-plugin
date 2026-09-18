@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,6 +60,7 @@ probe:
       connect_host: proxy.invalid:5000
     - url: socks5h://proxy2.invalid:5001
   max_attempts: 2
+  attempt_pause_ms: 0
 `
 
 func TestProbePoolIsolationExpiryAndCooldown(t *testing.T) {
@@ -205,6 +207,101 @@ func TestAbnormalProbeIsRejected(t *testing.T) {
 	if len(state.current) != 0 || state.probeResults[stateKey("auth-a", "model-a")] != "state_rejected" {
 		t.Fatal("356-character state was promoted")
 	}
+}
+
+func TestRejectedStateWalksPoolForAcceptedBlocks(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	bad := makeFernetToken(t, now, 11)
+	good := makeFernetToken(t, now, 10)
+	var calls int
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		calls++
+		if calls == 1 {
+			return bad, "ok"
+		}
+		return good, "ok"
+	}
+	state.ensureProbe("auth-a", "model-a")
+	if calls != 2 || state.current[stateKey("auth-a", "model-a")].Blocks != 10 {
+		t.Fatalf("11-block reject must walk the pool, calls=%d current=%#v", calls, state.current[stateKey("auth-a", "model-a")])
+	}
+}
+
+func TestRateLimitAbortsPoolAndBlocksAccount(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	var calls int
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		calls++
+		return "", "upstream_http_429_rate_limit_exceeded"
+	}
+	state.ensureProbe("auth-a", "model-a")
+	if calls != 1 {
+		t.Fatalf("429 must abort the pool, calls=%d", calls)
+	}
+	if !strings.Contains(state.probeResults[stateKey("auth-a", "model-a")], "429") {
+		t.Fatalf("probe result = %q", state.probeResults[stateKey("auth-a", "model-a")])
+	}
+	state.ensureProbe("auth-a", "model-b")
+	if calls != 1 {
+		t.Fatalf("429 must block the whole account, calls=%d", calls)
+	}
+	state.ensureProbe("auth-b", "model-a")
+	if calls != 2 {
+		t.Fatalf("other accounts must still probe, calls=%d", calls)
+	}
+}
+
+func TestQuotaBackoffStillAbortsPool(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	var calls int
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		calls++
+		return "", "upstream_http_429_usage_limit_reached"
+	}
+	state.ensureProbe("auth-a", "model-a")
+	state.ensureProbe("auth-a", "model-b")
+	if calls != 1 {
+		t.Fatalf("quota exhaustion must stop the account, calls=%d", calls)
+	}
+}
+
+func TestAccountProbesAreSerialized(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var startOnce sync.Once
+	state.fetch = func(ctx context.Context, _ probeAuth, _ string, _ *proxyEndpoint, _ proxyEndpoint) (string, string) {
+		calls.Add(1)
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return "", "network_error"
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		state.ensureProbe("auth-a", "model-a")
+	}()
+	<-started
+	state.ensureProbe("auth-a", "model-b")
+	if calls.Load() != 1 {
+		t.Fatalf("same account must not probe two models at once, calls=%d", calls.Load())
+	}
+	close(release)
+	<-done
 }
 
 func TestRetryToUnmanagedProviderDiscardsCandidate(t *testing.T) {

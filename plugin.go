@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.4.1"
+	pluginVersion     = "0.4.2"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -88,48 +88,54 @@ type stateCandidate struct {
 }
 
 type runtimeState struct {
-	mu              sync.Mutex
-	persistMu       sync.Mutex
-	now             func() time.Time
-	accepting       bool
-	config          pluginConfig
-	current         map[string]storedState
-	requests        map[string]requestBinding
-	candidates      map[string]stateCandidate
-	hostCall        func(string, any, any) error
-	probeCtx        context.Context
-	probeCancel     context.CancelFunc
-	generation      uint64
-	probing         map[string]bool
-	lastProbe       map[string]time.Time
-	probeResults    map[string]string
-	history         []historyEntry
-	accounts        accountCache
-	poolCursor      uint64
-	fetch           func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
-	workerDone      chan struct{}
-	wake            chan struct{}
-	refreshRequests map[string]string
-	probeReasons    map[string]string
-	blockedUntil    map[string]time.Time
+	mu                  sync.Mutex
+	persistMu           sync.Mutex
+	now                 func() time.Time
+	accepting           bool
+	config              pluginConfig
+	current             map[string]storedState
+	requests            map[string]requestBinding
+	candidates          map[string]stateCandidate
+	hostCall            func(string, any, any) error
+	probeCtx            context.Context
+	probeCancel         context.CancelFunc
+	generation          uint64
+	probing             map[string]bool
+	lastProbe           map[string]time.Time
+	probeResults        map[string]string
+	history             []historyEntry
+	accounts            accountCache
+	poolCursor          uint64
+	fetch               func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
+	workerDone          chan struct{}
+	wake                chan struct{}
+	refreshRequests     map[string]string
+	probeReasons        map[string]string
+	blockedUntil        map[string]time.Time
+	accountBlockedUntil map[string]time.Time
+	probingAccounts     map[string]int
+	pause               func(time.Duration)
 }
 
 var runtime = newRuntimeState()
 
 func newRuntimeState() *runtimeState {
 	return &runtimeState{
-		now:             time.Now,
-		fetch:           fetchProbe,
-		current:         make(map[string]storedState),
-		requests:        make(map[string]requestBinding),
-		candidates:      make(map[string]stateCandidate),
-		probing:         make(map[string]bool),
-		lastProbe:       make(map[string]time.Time),
-		probeResults:    make(map[string]string),
-		history:         make([]historyEntry, 0, historyLimit),
-		refreshRequests: make(map[string]string),
-		probeReasons:    make(map[string]string),
-		blockedUntil:    make(map[string]time.Time),
+		now:                 time.Now,
+		fetch:               fetchProbe,
+		current:             make(map[string]storedState),
+		requests:            make(map[string]requestBinding),
+		candidates:          make(map[string]stateCandidate),
+		probing:             make(map[string]bool),
+		lastProbe:           make(map[string]time.Time),
+		probeResults:        make(map[string]string),
+		history:             make([]historyEntry, 0, historyLimit),
+		refreshRequests:     make(map[string]string),
+		probeReasons:        make(map[string]string),
+		blockedUntil:        make(map[string]time.Time),
+		accountBlockedUntil: make(map[string]time.Time),
+		probingAccounts:     make(map[string]int),
+		pause:               time.Sleep,
 	}
 }
 
@@ -378,6 +384,8 @@ func (state *runtimeState) configure(raw []byte) error {
 	state.refreshRequests = make(map[string]string)
 	state.probeReasons = make(map[string]string)
 	state.blockedUntil = make(map[string]time.Time)
+	state.accountBlockedUntil = make(map[string]time.Time)
+	state.probingAccounts = make(map[string]int)
 	// Preserve in-memory states on hot reconfiguration even without a state file.
 	for key, candidate := range state.current {
 		authID, model := splitStateKey(key)

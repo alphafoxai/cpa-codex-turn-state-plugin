@@ -475,20 +475,22 @@ type statusCounters struct {
 }
 
 type probeConfigView struct {
-	Enabled              bool   `json:"enabled"`
-	BackgroundRefresh    bool   `json:"background_refresh"`
-	RefreshOnErrors      bool   `json:"refresh_on_errors"`
-	InjectExpired        bool   `json:"inject_expired"`
-	TimeoutSeconds       int    `json:"timeout_seconds"`
-	RetrySeconds         int    `json:"retry_seconds"`
-	RefreshBeforeSeconds int    `json:"refresh_before_seconds"`
-	MaxAttempts          int    `json:"max_attempts"`
-	QuotaBackoffSeconds  int    `json:"quota_backoff_seconds"`
-	ProxyPoolSize        int    `json:"proxy_pool_size"`
-	FirstProxy           bool   `json:"first_proxy"`
-	ProxySource          string `json:"proxy_source,omitempty"`
-	LiveProbes           int    `json:"live_probes"`
-	Accepting            bool   `json:"accepting"`
+	Enabled                  bool   `json:"enabled"`
+	BackgroundRefresh        bool   `json:"background_refresh"`
+	RefreshOnErrors          bool   `json:"refresh_on_errors"`
+	InjectExpired            bool   `json:"inject_expired"`
+	TimeoutSeconds           int    `json:"timeout_seconds"`
+	RetrySeconds             int    `json:"retry_seconds"`
+	RefreshBeforeSeconds     int    `json:"refresh_before_seconds"`
+	MaxAttempts              int    `json:"max_attempts"`
+	QuotaBackoffSeconds      int    `json:"quota_backoff_seconds"`
+	RateLimitBackoffSeconds  int    `json:"rate_limit_backoff_seconds"`
+	AttemptPauseMilliseconds int    `json:"attempt_pause_ms"`
+	ProxyPoolSize            int    `json:"proxy_pool_size"`
+	FirstProxy               bool   `json:"first_proxy"`
+	ProxySource              string `json:"proxy_source,omitempty"`
+	LiveProbes               int    `json:"live_probes"`
+	Accepting                bool   `json:"accepting"`
 }
 
 type defaultsView struct {
@@ -727,20 +729,27 @@ func (state *runtimeState) statusPayload() statusView {
 		BackgroundRefresh:    background,
 		RefreshBeforeSeconds: cfg.Probe.RefreshBeforeSeconds,
 		Probe: probeConfigView{
-			Enabled:              cfg.Probe.Enabled,
-			BackgroundRefresh:    enabledByDefault(cfg.Probe.BackgroundRefresh),
-			RefreshOnErrors:      enabledByDefault(cfg.Probe.RefreshOnErrors),
-			InjectExpired:        cfg.InjectExpired,
-			TimeoutSeconds:       cfg.Probe.TimeoutSeconds,
-			RetrySeconds:         cfg.Probe.RetrySeconds,
-			RefreshBeforeSeconds: cfg.Probe.RefreshBeforeSeconds,
-			MaxAttempts:          cfg.Probe.MaxAttempts,
-			QuotaBackoffSeconds:  cfg.Probe.QuotaBackoffSeconds,
-			ProxyPoolSize:        len(cfg.Probe.ProxyPool),
-			FirstProxy:           cfg.Probe.FirstProxy != nil,
-			ProxySource:          proxySource(cfg.Probe),
-			LiveProbes:           liveProbes,
-			Accepting:            state.accepting,
+			Enabled:                 cfg.Probe.Enabled,
+			BackgroundRefresh:       enabledByDefault(cfg.Probe.BackgroundRefresh),
+			RefreshOnErrors:         enabledByDefault(cfg.Probe.RefreshOnErrors),
+			InjectExpired:           cfg.InjectExpired,
+			TimeoutSeconds:          cfg.Probe.TimeoutSeconds,
+			RetrySeconds:            cfg.Probe.RetrySeconds,
+			RefreshBeforeSeconds:    cfg.Probe.RefreshBeforeSeconds,
+			MaxAttempts:             cfg.Probe.MaxAttempts,
+			QuotaBackoffSeconds:     cfg.Probe.QuotaBackoffSeconds,
+			RateLimitBackoffSeconds: cfg.Probe.RateLimitBackoffSeconds,
+			AttemptPauseMilliseconds: func() int {
+				if cfg.Probe.AttemptPauseMilliseconds == nil {
+					return 0
+				}
+				return *cfg.Probe.AttemptPauseMilliseconds
+			}(),
+			ProxyPoolSize: len(cfg.Probe.ProxyPool),
+			FirstProxy:    cfg.Probe.FirstProxy != nil,
+			ProxySource:   proxySource(cfg.Probe),
+			LiveProbes:    liveProbes,
+			Accepting:     state.accepting,
 		},
 		Counters:         counters,
 		Entries:          entries,
