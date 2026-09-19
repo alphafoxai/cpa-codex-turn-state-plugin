@@ -478,6 +478,8 @@ type probeConfigView struct {
 	Enabled                  bool   `json:"enabled"`
 	BackgroundRefresh        bool   `json:"background_refresh"`
 	RefreshOnErrors          bool   `json:"refresh_on_errors"`
+	ProbeOnErrorsOnly        bool   `json:"probe_on_errors_only"`
+	InjectOnErrorsOnly       bool   `json:"inject_on_errors_only"`
 	InjectExpired            bool   `json:"inject_expired"`
 	TimeoutSeconds           int    `json:"timeout_seconds"`
 	RetrySeconds             int    `json:"retry_seconds"`
@@ -732,6 +734,8 @@ func (state *runtimeState) statusPayload() statusView {
 			Enabled:                 cfg.Probe.Enabled,
 			BackgroundRefresh:       enabledByDefault(cfg.Probe.BackgroundRefresh),
 			RefreshOnErrors:         enabledByDefault(cfg.Probe.RefreshOnErrors),
+			ProbeOnErrorsOnly:       enabledByDefault(cfg.Probe.ProbeOnErrorsOnly),
+			InjectOnErrorsOnly:      enabledByDefault(cfg.InjectOnErrorsOnly),
 			InjectExpired:           cfg.InjectExpired,
 			TimeoutSeconds:          cfg.Probe.TimeoutSeconds,
 			RetrySeconds:            cfg.Probe.RetrySeconds,

@@ -24,6 +24,7 @@ type probeConfig struct {
 	MaxAttempts              int             `yaml:"max_attempts"`
 	BackgroundRefresh        *bool           `yaml:"background_refresh"`
 	RefreshOnErrors          *bool           `yaml:"refresh_on_errors"`
+	ProbeOnErrorsOnly        *bool           `yaml:"probe_on_errors_only"`
 	QuotaBackoffSeconds      int             `yaml:"quota_backoff_seconds"`
 	RateLimitBackoffSeconds  int             `yaml:"rate_limit_backoff_seconds"`
 	AttemptPauseMilliseconds *int            `yaml:"attempt_pause_ms"`
@@ -46,7 +47,7 @@ func normalizeProbe(cfg *probeConfig) error {
 		cfg.QuotaBackoffSeconds = 900
 	}
 	if cfg.RateLimitBackoffSeconds == 0 {
-		cfg.RateLimitBackoffSeconds = 180
+		cfg.RateLimitBackoffSeconds = 60
 	}
 	if cfg.AttemptPauseMilliseconds == nil {
 		defaultPause := 2000
@@ -145,9 +146,9 @@ func (state *runtimeState) selectedProbeAuth(authID string) (probeAuth, error) {
 func abortKind(status string) string {
 	lower := strings.ToLower(status)
 	switch {
-	case strings.Contains(lower, "usage_limit_reached"), strings.Contains(lower, "insufficient_quota"):
+	case strings.Contains(lower, "usage_limit_reached"), strings.Contains(lower, "insufficient_quota"), strings.Contains(lower, "rate_limit_exceeded"):
 		return "quota"
-	case strings.Contains(lower, "rate_limit_exceeded"), strings.Contains(lower, "upstream_http_429"), strings.Contains(lower, "invalid_api_key"):
+	case strings.Contains(lower, "upstream_http_429"), strings.Contains(lower, "invalid_api_key"):
 		return "rate"
 	default:
 		return ""
@@ -200,6 +201,10 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	current := state.current[key]
 	reason := state.refreshRequests[key]
+	if enabledByDefault(cfg.Probe.ProbeOnErrorsOnly) && reason == "" {
+		state.mu.Unlock()
+		return
+	}
 	if reason == "" && current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(current.IssuedAt.Add(turnStateTTL-time.Duration(cfg.Probe.RefreshBeforeSeconds)*time.Second)) {
 		state.mu.Unlock()
 		return
@@ -290,6 +295,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		delete(state.refreshRequests, key)
 		delete(state.blockedUntil, key)
 		delete(state.accountBlockedUntil, authID)
+		state.forceInject[key] = true
 		promoted = true
 	}
 	state.appendHistoryLocked(historyEntry{
