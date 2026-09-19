@@ -273,35 +273,39 @@ func TestQuotaBackoffStillAbortsPool(t *testing.T) {
 	}
 }
 
-func TestAccountProbesAreSerialized(t *testing.T) {
+func TestAccountModelsProbeInParallel(t *testing.T) {
 	state := newRuntimeState()
 	state.hostCall = mockAuthHost
 	configureRuntime(t, state, probeTestConfig)
-	started := make(chan struct{})
+	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	var calls atomic.Int32
-	var startOnce sync.Once
 	state.fetch = func(ctx context.Context, _ probeAuth, _ string, _ *proxyEndpoint, _ proxyEndpoint) (string, string) {
 		calls.Add(1)
-		startOnce.Do(func() { close(started) })
+		started <- struct{}{}
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
 		return "", "network_error"
 	}
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		defer close(done)
+		defer wg.Done()
 		state.ensureProbe("auth-a", "model-a")
 	}()
+	go func() {
+		defer wg.Done()
+		state.ensureProbe("auth-a", "model-b")
+	}()
 	<-started
-	state.ensureProbe("auth-a", "model-b")
-	if calls.Load() != 1 {
-		t.Fatalf("same account must not probe two models at once, calls=%d", calls.Load())
+	<-started
+	if calls.Load() != 2 {
+		t.Fatalf("same account models should probe in parallel, calls=%d", calls.Load())
 	}
 	close(release)
-	<-done
+	wg.Wait()
 }
 
 func TestRetryToUnmanagedProviderDiscardsCandidate(t *testing.T) {

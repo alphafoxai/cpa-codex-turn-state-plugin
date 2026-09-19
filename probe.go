@@ -195,7 +195,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	cfg := state.config
 	policy, ok := credentialFor(cfg, authID)
 	now := state.now()
-	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || state.probingAccounts[authID] > 0 || len(state.probing) >= 4 {
+	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 8 {
 		state.mu.Unlock()
 		return
 	}
@@ -227,7 +227,6 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	state.probeReasons[key] = reason
 	state.probing[key] = true
-	state.probingAccounts[authID]++
 	generation := state.generation
 	ctx, cancel := context.WithTimeout(state.probeCtx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second)
 	start := state.poolCursor
@@ -273,11 +272,6 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	state.mu.Lock()
 	delete(state.probing, key)
-	if n := state.probingAccounts[authID]; n <= 1 {
-		delete(state.probingAccounts, authID)
-	} else {
-		state.probingAccounts[authID] = n - 1
-	}
 	if generation != state.generation {
 		state.mu.Unlock()
 		return
