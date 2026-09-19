@@ -143,6 +143,47 @@ func (state *runtimeState) selectedProbeAuth(authID string) (probeAuth, error) {
 	return probeAuth{}, errors.New("selected auth not found")
 }
 
+func preferredProbeModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "astra")
+}
+
+func modelProbePriority(model string) int {
+	if preferredProbeModel(model) {
+		return 0
+	}
+	return 1
+}
+
+func (state *runtimeState) accountHasDuePreferredLocked(authID string) bool {
+	now := state.now()
+	refreshBefore := time.Duration(state.config.Probe.RefreshBeforeSeconds) * time.Second
+	check := func(key string) bool {
+		account, model := splitStateKey(key)
+		if account != authID || !preferredProbeModel(model) {
+			return false
+		}
+		if state.probing[key] || state.refreshRequests[key] != "" {
+			return true
+		}
+		current := state.current[key]
+		if current.Value == "" || current.IssuedAt.After(now.Add(5*time.Minute)) {
+			return true
+		}
+		return !now.Before(current.IssuedAt.Add(turnStateTTL - refreshBefore))
+	}
+	for key := range state.current {
+		if check(key) {
+			return true
+		}
+	}
+	for key := range state.refreshRequests {
+		if check(key) {
+			return true
+		}
+	}
+	return false
+}
+
 func abortKind(status string) string {
 	lower := strings.ToLower(status)
 	switch {
@@ -195,7 +236,11 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	cfg := state.config
 	policy, ok := credentialFor(cfg, authID)
 	now := state.now()
-	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 8 {
+	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || state.probingAccounts[authID] > 0 || len(state.probing) >= 4 {
+		state.mu.Unlock()
+		return
+	}
+	if !preferredProbeModel(model) && state.accountHasDuePreferredLocked(authID) {
 		state.mu.Unlock()
 		return
 	}
@@ -227,6 +272,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	state.probeReasons[key] = reason
 	state.probing[key] = true
+	state.probingAccounts[authID]++
 	generation := state.generation
 	ctx, cancel := context.WithTimeout(state.probeCtx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second)
 	start := state.poolCursor
@@ -272,6 +318,11 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	state.mu.Lock()
 	delete(state.probing, key)
+	if n := state.probingAccounts[authID]; n <= 1 {
+		delete(state.probingAccounts, authID)
+	} else {
+		state.probingAccounts[authID] = n - 1
+	}
 	if generation != state.generation {
 		state.mu.Unlock()
 		return

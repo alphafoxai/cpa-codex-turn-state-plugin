@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -85,27 +84,26 @@ func (state *runtimeState) refreshDue(ctx context.Context) {
 	}
 	state.mu.Unlock()
 	sort.Slice(jobs, func(i, j int) bool {
+		_, mi := splitStateKey(jobs[i].key)
+		_, mj := splitStateKey(jobs[j].key)
+		pi, pj := modelProbePriority(mi), modelProbePriority(mj)
+		if pi != pj {
+			return pi < pj
+		}
 		if jobs[i].due.Equal(jobs[j].due) {
 			return jobs[i].key < jobs[j].key
 		}
 		return jobs[i].due.Before(jobs[j].due)
 	})
-	var wg sync.WaitGroup
 	for _, job := range jobs {
 		if ctx.Err() != nil {
-			break
+			return
 		}
 		auth, model := splitStateKey(job.key)
-		if auth == "" || model == "" {
-			continue
-		}
-		wg.Add(1)
-		go func(auth, model string) {
-			defer wg.Done()
+		if auth != "" && model != "" {
 			state.ensureProbe(auth, model)
-		}(auth, model)
+		}
 	}
-	wg.Wait()
 }
 
 func (state *runtimeState) nextRefreshLocked(key string) time.Time {

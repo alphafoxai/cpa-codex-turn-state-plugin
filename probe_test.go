@@ -273,39 +273,60 @@ func TestQuotaBackoffStillAbortsPool(t *testing.T) {
 	}
 }
 
-func TestAccountModelsProbeInParallel(t *testing.T) {
+func TestAccountProbesAreSerialized(t *testing.T) {
 	state := newRuntimeState()
 	state.hostCall = mockAuthHost
 	configureRuntime(t, state, probeTestConfig)
-	started := make(chan struct{}, 2)
+	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
+	var startOnce sync.Once
 	state.fetch = func(ctx context.Context, _ probeAuth, _ string, _ *proxyEndpoint, _ proxyEndpoint) (string, string) {
 		calls.Add(1)
-		started <- struct{}{}
+		startOnce.Do(func() { close(started) })
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
 		return "", "network_error"
 	}
-	var wg sync.WaitGroup
-	wg.Add(2)
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(done)
 		state.ensureProbe("auth-a", "model-a")
 	}()
-	go func() {
-		defer wg.Done()
-		state.ensureProbe("auth-a", "model-b")
-	}()
 	<-started
-	<-started
-	if calls.Load() != 2 {
-		t.Fatalf("same account models should probe in parallel, calls=%d", calls.Load())
+	state.ensureProbe("auth-a", "model-b")
+	if calls.Load() != 1 {
+		t.Fatalf("same account must not probe two models at once, calls=%d", calls.Load())
 	}
 	close(release)
-	wg.Wait()
+	<-done
+}
+
+func TestPreferredAstraBlocksOtherModels(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	var models []string
+	state.fetch = func(_ context.Context, _ probeAuth, model string, _ *proxyEndpoint, _ proxyEndpoint) (string, string) {
+		models = append(models, model)
+		return "", "network_error"
+	}
+	state.refreshRequests[stateKey("auth-a", "gpt-6-astra")] = "missing_state"
+	state.ensureProbe("auth-a", "gpt-5.6-luna")
+	if len(models) != 0 {
+		t.Fatalf("luna must wait while astra is due, models=%v", models)
+	}
+	state.ensureProbe("auth-a", "gpt-6-astra")
+	if len(models) == 0 || models[0] != "gpt-6-astra" {
+		t.Fatalf("astra should probe first, models=%v", models)
+	}
+	for _, model := range models {
+		if model != "gpt-6-astra" {
+			t.Fatalf("only astra should run, models=%v", models)
+		}
+	}
 }
 
 func TestRetryToUnmanagedProviderDiscardsCandidate(t *testing.T) {

@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.4.4"
+	pluginVersion     = "0.4.5"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -114,6 +114,7 @@ type runtimeState struct {
 	probeReasons        map[string]string
 	blockedUntil        map[string]time.Time
 	accountBlockedUntil map[string]time.Time
+	probingAccounts     map[string]int
 	pause               func(time.Duration)
 	forceInject         map[string]bool
 }
@@ -135,6 +136,7 @@ func newRuntimeState() *runtimeState {
 		probeReasons:        make(map[string]string),
 		blockedUntil:        make(map[string]time.Time),
 		accountBlockedUntil: make(map[string]time.Time),
+		probingAccounts:     make(map[string]int),
 		pause:               time.Sleep,
 		forceInject:         make(map[string]bool),
 	}
@@ -387,6 +389,7 @@ func (state *runtimeState) configure(raw []byte) error {
 	state.probeReasons = make(map[string]string)
 	state.blockedUntil = make(map[string]time.Time)
 	state.accountBlockedUntil = make(map[string]time.Time)
+	state.probingAccounts = make(map[string]int)
 	state.forceInject = make(map[string]bool)
 	// Preserve in-memory states on hot reconfiguration even without a state file.
 	for key, candidate := range state.current {
