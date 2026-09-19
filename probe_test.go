@@ -329,6 +329,49 @@ func TestPreferredAstraBlocksOtherModels(t *testing.T) {
 	}
 }
 
+func TestFreshStateSkipsQueuedRetry(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	configureRuntime(t, state, probeTestConfig)
+	key := stateKey("auth-a", "gpt-6-astra")
+	state.current[key] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
+	state.refreshRequests[key] = "credential_retry"
+	var calls int
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		calls++
+		return "", "network_error"
+	}
+	state.ensureProbe("auth-a", "gpt-6-astra")
+	if calls != 0 {
+		t.Fatalf("fresh 10-block must not probe on credential_retry, calls=%d", calls)
+	}
+	if state.refreshRequests[key] != "" {
+		t.Fatalf("stale refresh queue should be cleared, got %q", state.refreshRequests[key])
+	}
+}
+
+func TestManualRefreshStillProbesFreshState(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	configureRuntime(t, state, probeTestConfig)
+	key := stateKey("auth-a", "gpt-6-astra")
+	state.current[key] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
+	state.refreshRequests[key] = "manual"
+	var calls int
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		calls++
+		return "", "network_error"
+	}
+	state.ensureProbe("auth-a", "gpt-6-astra")
+	if calls == 0 {
+		t.Fatal("manual refresh should probe even with a fresh card")
+	}
+}
+
 func TestRetryToUnmanagedProviderDiscardsCandidate(t *testing.T) {
 	state := newRuntimeState()
 	configureRuntime(t, state, "defaults:\n  accepted_blocks: [10,12]\n")

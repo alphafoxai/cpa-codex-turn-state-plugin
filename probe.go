@@ -154,22 +154,29 @@ func modelProbePriority(model string) int {
 	return 1
 }
 
+func (state *runtimeState) currentFreshLocked(current storedState, policy credentialConfig, now time.Time) bool {
+	if current.Value == "" || !normalBlockCount(policy, current.Blocks) {
+		return false
+	}
+	if current.IssuedAt.After(now.Add(5 * time.Minute)) {
+		return false
+	}
+	refreshBefore := time.Duration(state.config.Probe.RefreshBeforeSeconds) * time.Second
+	return now.Before(current.IssuedAt.Add(turnStateTTL - refreshBefore))
+}
+
 func (state *runtimeState) accountHasDuePreferredLocked(authID string) bool {
 	now := state.now()
-	refreshBefore := time.Duration(state.config.Probe.RefreshBeforeSeconds) * time.Second
+	policy, _ := credentialFor(state.config, authID)
 	check := func(key string) bool {
 		account, model := splitStateKey(key)
 		if account != authID || !preferredProbeModel(model) {
 			return false
 		}
-		if state.probing[key] || state.refreshRequests[key] != "" {
+		if state.probing[key] {
 			return true
 		}
-		current := state.current[key]
-		if current.Value == "" || current.IssuedAt.After(now.Add(5*time.Minute)) {
-			return true
-		}
-		return !now.Before(current.IssuedAt.Add(turnStateTTL - refreshBefore))
+		return !state.currentFreshLocked(state.current[key], policy, now)
 	}
 	for key := range state.current {
 		if check(key) {
@@ -250,7 +257,8 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		state.mu.Unlock()
 		return
 	}
-	if reason == "" && current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(current.IssuedAt.Add(turnStateTTL-time.Duration(cfg.Probe.RefreshBeforeSeconds)*time.Second)) {
+	if state.currentFreshLocked(current, policy, now) && reason != "manual" {
+		delete(state.refreshRequests, key)
 		state.mu.Unlock()
 		return
 	}

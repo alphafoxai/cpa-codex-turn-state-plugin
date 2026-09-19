@@ -126,24 +126,18 @@ func TestErrorRefreshIsQueuedDeduplicatedAndCooledDown(t *testing.T) {
 		t.Fatal("failure hook blocked or failed to queue")
 	}
 	state.refreshDue(context.Background())
-	if calls != 2 || state.current[key].Value != old {
-		t.Fatal("early probe did not run/preserve good cache")
+	if calls != 0 || state.current[key].Value != old {
+		t.Fatal("fresh cache was burned by queued error refresh")
+	}
+	if state.refreshRequests[key] != "" {
+		t.Fatal("fresh cache should drop queued retry")
 	}
 	state.mu.Lock()
 	state.queueRefreshLocked(key, "overload")
 	state.mu.Unlock()
 	state.refreshDue(context.Background())
-	if calls != 2 {
-		t.Fatal("error burst bypassed cooldown")
-	}
-	now = now.Add(time.Minute)
-	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
-		calls++
-		return makeFernetToken(t, now, 10), "ok"
-	}
-	state.refreshDue(context.Background())
-	if calls != 3 || state.refreshRequests[key] != "" || !state.current[key].IssuedAt.Equal(now) {
-		t.Fatal("pending refresh not retried/promoted")
+	if calls != 0 {
+		t.Fatal("error burst probed a still-fresh state")
 	}
 }
 
