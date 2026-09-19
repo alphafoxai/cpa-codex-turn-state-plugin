@@ -46,7 +46,7 @@ func normalizeProbe(cfg *probeConfig) error {
 		cfg.QuotaBackoffSeconds = 900
 	}
 	if cfg.RateLimitBackoffSeconds == 0 {
-		cfg.RateLimitBackoffSeconds = 600
+		cfg.RateLimitBackoffSeconds = 180
 	}
 	if cfg.AttemptPauseMilliseconds == nil {
 		defaultPause := 2000
